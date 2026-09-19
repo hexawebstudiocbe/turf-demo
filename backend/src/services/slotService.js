@@ -1,155 +1,289 @@
-const Turf = require('../models/Turf');
-const Booking = require('../models/Booking');
-const BlockedSlot = require('../models/BlockedSlot');
-const { generateSlots, isDateInPast, isSlotInPast, doTimeIntervalsOverlap } = require('../utils/timeHelper');
-const { calculateSlotPrice } = require('./pricingService');
+const supabase = require('../config/supabase');
 
-/**
- * Releases expired HELD bookings to free up index locks
- */
-const cleanupExpiredHolds = async (turfId, dateStr) => {
-  const now = new Date();
-  await Booking.updateMany(
-    {
-      turfId,
-      date: dateStr,
-      bookingStatus: 'HELD',
-      holdExpiresAt: { $lt: now },
-    },
-    {
-      $set: { bookingStatus: 'EXPIRED' },
-    }
+const {
+  generateSlots,
+  isDateInPast,
+  isSlotInPast,
+} = require('../utils/timeHelper');
+
+const {
+  calculateSlotPrice,
+} = require('./pricingService');
+
+const cleanupExpiredHolds = async (
+  turfId,
+  dateStr
+) => {
+  const { error } = await supabase.rpc(
+    'expire_booking_holds'
   );
+
+  if (error) {
+    console.error(
+      '[Slots] Hold cleanup failed:',
+      error.message
+    );
+  }
 };
 
-/**
- * Generates slots with real-time status and pricing for a specific date
- */
-const getSlotsForDate = async (turfId, dateStr) => {
-  const turf = await Turf.findById(turfId);
-  if (!turf) {
-    throw new Error('Turf not found');
+const getTurf = async (turfId) => {
+  const { data, error } = await supabase
+    .from('turf')
+    .select('*')
+    .eq('id', turfId)
+    .eq('active', true)
+    .single();
+
+  if (error || !data) {
+    const err = new Error('Turf not found');
+    err.statusCode = 404;
+    throw err;
   }
 
-  // 1. Release expired holds for this date
-  await cleanupExpiredHolds(turfId, dateStr);
+  return data;
+};
 
-  const isPastDate = isDateInPast(dateStr);
+const getSlotsForDate = async (
+  turfId,
+  dateStr
+) => {
+  const turf = await getTurf(turfId);
 
-  // 2. Fetch active bookings (HELD, CONFIRMED, COMPLETED)
-  const activeBookings = await Booking.find({
+  await cleanupExpiredHolds(
     turfId,
-    date: dateStr,
-    bookingStatus: { $in: ['HELD', 'CONFIRMED', 'COMPLETED'] },
-  });
+    dateStr
+  );
 
-  // 3. Fetch blocked slots
-  const blockedSlots = await BlockedSlot.find({
-    turfId,
-    date: dateStr,
-  });
+  const isPastDate =
+    isDateInPast(dateStr);
 
-  // 4. Generate standard time slots
-  const baseSlots = generateSlots(turf.openingTime, turf.closingTime, turf.slotDuration || 60);
+  // --------------------------------------------------------
+  // Business hours
+  // --------------------------------------------------------
 
-  // 5. Map slots with status & pricing
+  const dayOfWeek =
+    new Date(`${dateStr}T00:00:00`).getUTCDay();
+
+  const {
+    data: businessHours,
+    error: hoursError,
+  } = await supabase
+    .from('business_hours')
+    .select('*')
+    .eq('turf_id', turfId)
+    .eq('day_of_week', dayOfWeek)
+    .single();
+
+  if (hoursError || !businessHours) {
+    throw new Error(
+      'Business hours are not configured for this day'
+    );
+  }
+
+  if (!businessHours.is_open) {
+    return {
+      date: dateStr,
+      turfId,
+      turfName: turf.name,
+      totalSlots: 0,
+      availableSlotsCount: 0,
+      closed: true,
+      slots: [],
+    };
+  }
+
+  // --------------------------------------------------------
+  // Generate hourly slots
+  // --------------------------------------------------------
+
+  const baseSlots = generateSlots(
+    businessHours.open_time.slice(0, 5),
+    businessHours.close_time.slice(0, 5),
+    60
+  );
+
+  // --------------------------------------------------------
+  // Existing reservations
+  // --------------------------------------------------------
+
+  const {
+    data: reservations,
+    error: reservationError,
+  } = await supabase
+    .from('slot_reservations')
+    .select('*')
+    .eq('turf_id', turfId)
+    .eq('reservation_date', dateStr);
+
+  if (reservationError) {
+    throw new Error(
+      `Unable to load reservations: ${reservationError.message}`
+    );
+  }
+
   const now = new Date();
-  const slotsWithStatus = await Promise.all(
+
+  const slots = await Promise.all(
     baseSlots.map(async (slot) => {
-      // Check if slot overlaps with any blocked range
-      const blocked = blockedSlots.find((b) =>
-        doTimeIntervalsOverlap(slot.startTime, slot.endTime, b.startTime, b.endTime)
-      );
-
-      if (blocked) {
-        return {
-          ...slot,
-          status: 'BLOCKED',
-          blockReason: blocked.reason,
-          blockNotes: blocked.notes,
-          blockedId: blocked._id,
-        };
-      }
-
-      // Check if slot overlaps with any active booking (single or multi-hour)
-      const booking = activeBookings.find((b) => {
-        if (b.slotTimes && b.slotTimes.length > 0) {
-          return b.slotTimes.includes(slot.startTime);
-        }
-        return doTimeIntervalsOverlap(slot.startTime, slot.endTime, b.startTime, b.endTime);
-      });
+      const reservation =
+        (reservations || []).find(
+          (r) =>
+            r.start_time.slice(0, 5) ===
+            slot.startTime
+        );
 
       let status = 'AVAILABLE';
       let holdRemainingSeconds = 0;
-      let heldByCustomer = null;
+      let bookingId;
 
-      if (booking) {
-        if (booking.bookingStatus === 'CONFIRMED' || booking.bookingStatus === 'COMPLETED') {
+      if (reservation) {
+        if (
+          reservation.status === 'BLOCKED'
+        ) {
+          status = 'BLOCKED';
+        } else if (
+          reservation.status === 'BOOKED'
+        ) {
           status = 'BOOKED';
-        } else if (booking.bookingStatus === 'HELD') {
-          if (booking.holdExpiresAt && booking.holdExpiresAt > now) {
+          bookingId =
+            reservation.booking_id;
+        } else if (
+          reservation.status === 'HOLD'
+        ) {
+          const expiry =
+            new Date(
+              reservation.hold_expires_at
+            );
+
+          if (expiry > now) {
             status = 'HELD';
-            holdRemainingSeconds = Math.max(0, Math.floor((booking.holdExpiresAt - now) / 1000));
-            heldByCustomer = booking.customerDetails?.name || 'Customer';
+
+            holdRemainingSeconds =
+              Math.max(
+                0,
+                Math.floor(
+                  (expiry - now) / 1000
+                )
+              );
+
+            bookingId =
+              reservation.booking_id;
           } else {
             status = 'AVAILABLE';
           }
         }
       }
 
-      // Check if past
-      if (isPastDate || isSlotInPast(dateStr, slot.startTime)) {
+      if (
+        isPastDate ||
+        isSlotInPast(
+          dateStr,
+          slot.startTime
+        )
+      ) {
         if (status === 'AVAILABLE') {
           status = 'PAST';
         }
       }
 
-      // Calculate single slot server price
-      const pricing = await calculateSlotPrice(turfId, dateStr, slot.startTime, slot.endTime);
+      let price = null;
+      let advanceAmount = null;
+      let remainingAmount = null;
+      let appliedRule = null;
+
+      if (status !== 'BLOCKED') {
+        try {
+          const pricing =
+            await calculateSlotPrice(
+              turfId,
+              dateStr,
+              slot.startTime,
+              slot.endTime
+            );
+
+          price = pricing.totalAmount;
+          advanceAmount =
+            pricing.advanceAmount;
+          remainingAmount =
+            pricing.remainingAmount;
+          appliedRule =
+            pricing.appliedRule;
+        } catch (error) {
+          console.error(
+            '[Slots] Pricing error:',
+            error.message
+          );
+        }
+      }
 
       return {
         ...slot,
         status,
+        bookingId,
         holdRemainingSeconds,
-        heldByCustomer: status === 'HELD' ? heldByCustomer : undefined,
-        bookingId: booking ? booking.bookingId : undefined,
-        durationHours: booking ? booking.durationHours : 1,
-        price: pricing.totalAmount,
-        advanceAmount: pricing.advanceAmount,
-        remainingAmount: pricing.remainingAmount,
-        appliedRule: pricing.appliedRule,
+        price,
+        advanceAmount,
+        remainingAmount,
+        appliedRule,
+        durationHours: 1,
       };
     })
   );
 
-  // 6. Calculate maximum consecutive available hours starting from each available slot
-  const slotsWithConsecutive = slotsWithStatus.map((slot, index) => {
-    if (slot.status !== 'AVAILABLE') {
-      return { ...slot, maxConsecutiveHours: 0 };
-    }
+  // --------------------------------------------------------
+  // Calculate consecutive availability
+  // --------------------------------------------------------
 
-    let consecutive = 1;
-    for (let j = index + 1; j < slotsWithStatus.length; j++) {
-      if (slotsWithStatus[j].status === 'AVAILABLE') {
-        consecutive++;
-      } else {
-        break;
+  const slotsWithConsecutive =
+    slots.map((slot, index) => {
+      if (
+        slot.status !== 'AVAILABLE'
+      ) {
+        return {
+          ...slot,
+          maxConsecutiveHours: 0,
+        };
       }
-    }
 
-    return {
-      ...slot,
-      maxConsecutiveHours: Math.min(consecutive, 6), // allow up to 6 hours max
-    };
-  });
+      let consecutive = 1;
+
+      for (
+        let i = index + 1;
+        i < slots.length;
+        i++
+      ) {
+        if (
+          slots[i].status ===
+          'AVAILABLE'
+        ) {
+          consecutive++;
+        } else {
+          break;
+        }
+      }
+
+      return {
+        ...slot,
+        maxConsecutiveHours:
+          consecutive,
+      };
+    });
 
   return {
     date: dateStr,
-    turfId: turf._id,
+    turfId,
     turfName: turf.name,
-    totalSlots: slotsWithConsecutive.length,
-    availableSlotsCount: slotsWithConsecutive.filter((s) => s.status === 'AVAILABLE').length,
-    slots: slotsWithConsecutive,
+    totalSlots:
+      slotsWithConsecutive.length,
+    availableSlotsCount:
+      slotsWithConsecutive.filter(
+        (slot) =>
+          slot.status ===
+          'AVAILABLE'
+      ).length,
+    closed: false,
+    slots:
+      slotsWithConsecutive,
   };
 };
 

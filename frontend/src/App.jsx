@@ -5,9 +5,7 @@ import Footer from './components/Footer';
 import HomePage from './pages/HomePage';
 import BookPage from './pages/BookPage';
 import ConfirmationPage from './pages/ConfirmationPage';
-import MyBookingsPage from './pages/MyBookingsPage';
 import LoginPage from './pages/LoginPage';
-import RegisterPage from './pages/RegisterPage';
 import AdminLayout from './layouts/AdminLayout';
 import AdminDashboardPage from './pages/admin/AdminDashboardPage';
 import AdminBookingsPage from './pages/admin/AdminBookingsPage';
@@ -16,7 +14,7 @@ import AdminPricingPage from './pages/admin/AdminPricingPage';
 import AdminTurfPage from './pages/admin/AdminTurfPage';
 import AdminCustomersPage from './pages/admin/AdminCustomersPage';
 import AdminPaymentsPage from './pages/admin/AdminPaymentsPage';
-import { ProtectedRoute, AdminRoute } from './components/ProtectedRoute';
+import { AdminRoute } from './components/ProtectedRoute';
 
 // Public Customer Layout wrapper
 const PublicLayout = () => {
@@ -55,16 +53,7 @@ function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/book" element={<BookPage />} />
         <Route path="/booking/confirmation/:id" element={<ConfirmationPage />} />
-        <Route
-          path="/my-bookings"
-          element={
-            <ProtectedRoute>
-              <MyBookingsPage />
-            </ProtectedRoute>
-          }
-        />
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/register" element={<RegisterPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
 

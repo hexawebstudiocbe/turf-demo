@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { Lock, Mail, Shield, User, AlertCircle, Sparkles } from 'lucide-react';
 
 const LoginPage = () => {
-  const { login, loginAsDemoAdmin, loginAsDemoCustomer } = useAuth();
+  const { login, loginAsDemoAdmin } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -13,7 +13,7 @@ const LoginPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const from = location.state?.from?.pathname || (location.state?.requireAdmin ? '/admin' : '/');
+  const from = location.state?.from?.pathname || '/admin';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -47,19 +47,6 @@ const LoginPage = () => {
     }
   };
 
-  const handleDemoCustomer = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await loginAsDemoCustomer();
-      navigate('/book');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <div className="min-h-[80vh] flex items-center justify-center px-4 py-12">
       <div className="glass-card max-w-md w-full p-8 space-y-6 border-pitch-500/30">
@@ -76,7 +63,7 @@ const LoginPage = () => {
           <p className="text-[10px] font-bold uppercase text-slate-400 tracking-wider text-center">
             ⚡ Quick 1-Click Demo Login
           </p>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 gap-2">
             <button
               type="button"
               onClick={handleDemoAdmin}
@@ -85,15 +72,6 @@ const LoginPage = () => {
             >
               <Shield className="w-3.5 h-3.5" />
               Owner (Admin)
-            </button>
-            <button
-              type="button"
-              onClick={handleDemoCustomer}
-              disabled={loading}
-              className="px-3 py-2 bg-pitch-500/15 hover:bg-pitch-500/25 border border-pitch-500/40 text-pitch-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition"
-            >
-              <User className="w-3.5 h-3.5" />
-              Customer
             </button>
           </div>
         </div>
@@ -145,12 +123,6 @@ const LoginPage = () => {
           </button>
         </form>
 
-        <div className="text-center text-xs text-slate-400 pt-2 border-t border-slate-800">
-          Don't have an account?{' '}
-          <Link to="/register" className="text-pitch-400 font-bold hover:underline">
-            Register as Customer
-          </Link>
-        </div>
       </div>
     </div>
   );

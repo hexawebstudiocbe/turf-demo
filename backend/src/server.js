@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const connectDB = require('./config/db');
+
 
 // Route imports
 const authRoutes = require('./routes/authRoutes');
@@ -82,11 +82,9 @@ const PORT = process.env.PORT || 5001;
 
 let server = null;
 if (process.env.NODE_ENV !== 'test') {
-  connectDB().then(() => {
-    server = app.listen(PORT, () => {
-      console.log(`[TurfBook API] Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-      console.log(`[TurfBook API] Health check at http://localhost:${PORT}/api/health`);
-    });
+  server = app.listen(PORT, () => {
+    console.log(`[TurfBook API] Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+    console.log(`[TurfBook API] Health check at http://localhost:${PORT}/api/health`);
   });
 }
 

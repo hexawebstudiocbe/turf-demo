@@ -1,14 +1,28 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
-const { requireAuth, requireAdmin } = require('../middleware/authMiddleware');
+const { requireAdmin } = require('../middleware/authMiddleware');
 
 // Guard all admin routes with authentication and admin role check
-router.use(requireAuth, requireAdmin);
+router.use(requireAdmin);
 
 router.get('/dashboard', adminController.getDashboardStats);
 router.get('/bookings', adminController.getAdminBookings);
-router.patch('/bookings/:id/status', adminController.updateBookingStatus);
+
+router.post(
+  '/bookings/offline',
+  adminController.createOfflineBooking
+);
+
+router.post(
+  '/bookings/:id/extend',
+  adminController.extendBooking
+);
+
+router.patch(
+  '/bookings/:id/status',
+  adminController.updateBookingStatus
+);
 
 router.get('/slots', adminController.getAdminSlots);
 router.post('/slots/block', adminController.blockSlot);

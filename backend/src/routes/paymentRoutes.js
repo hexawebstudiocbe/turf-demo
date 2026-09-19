@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const bookingController = require('../controllers/bookingController');
-const { optionalAuth } = require('../middleware/authMiddleware');
+const paymentController = require('../controllers/paymentController');
 
-router.post('/verify', optionalAuth, bookingController.verifyPaymentAndConfirm);
+// The webhook must read the raw body for signature verification in real Razorpay,
+// but for standard body parser it's usually handled in a middleware.
+// For now, standard express json body parser is fine for mock tests.
+router.post('/webhook', paymentController.handleWebhook);
+router.post('/verify', paymentController.verifyPaymentAndConfirm);
 
 module.exports = router;

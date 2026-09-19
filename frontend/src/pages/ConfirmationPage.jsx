@@ -82,9 +82,7 @@ const ConfirmationPage = () => {
 
       {/* Bottom Navigation */}
       <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-6 print:hidden">
-        <Link to="/my-bookings" className="btn-secondary text-sm py-3 px-6 w-full sm:w-auto text-center">
-          View in My Bookings
-        </Link>
+
         <Link to="/book" className="btn-primary text-sm py-3 px-6 w-full sm:w-auto text-center flex items-center justify-center gap-2">
           <Calendar className="w-4 h-4" />
           Book Another Slot

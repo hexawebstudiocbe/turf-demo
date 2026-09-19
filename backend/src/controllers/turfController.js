@@ -1,69 +1,161 @@
-const Turf = require('../models/Turf');
-const Review = require('../models/Review');
+const supabase = require('../config/supabase');
+const reviewService = require('../services/reviewService');
 const { sendSuccess, sendError } = require('../utils/response');
+
+const getActiveTurf = async () => {
+  const { data, error } = await supabase
+    .from('turf')
+    .select('*')
+    .eq('active', true)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Unable to load turf: ${error.message}`
+    );
+  }
+
+  return data;
+};
 
 const getTurf = async (req, res, next) => {
   try {
-    let turf = await Turf.findOne({ isActive: true });
+    const turf = await getActiveTurf();
+
     if (!turf) {
-      // Create initial default turf if empty
-      turf = await Turf.create({
-        name: 'Arena Sports Turf',
-        tagline: 'Premium FIFA-Grade 50mm Artificial Grass Turf',
-        description:
-          'Experience world-class football and box cricket under professional LED floodlights. Featuring high-grade shock-absorbent artificial grass, clean changing rooms, showers, player dugout, and ample parking.',
-        address: '124, Avinashi Road, Peelamedu',
-        city: 'Coimbatore',
-        state: 'Tamil Nadu',
-        country: 'India',
-        latitude: 11.0283,
-        longitude: 77.0041,
-        googleMapsUrl: 'https://maps.google.com/?q=11.0283,77.0041',
-        sports: ['Football (5v5 / 7v7)', 'Box Cricket', 'Badminton'],
-        amenities: [
-          'FIFA-Approved 50mm Turf',
-          'Professional Anti-Glare LED Floodlights',
-          'AC Changing Rooms & Showers',
-          'Hygienic Restrooms',
-          'Purified RO Drinking Water',
-          'Covered Spectator Gallery',
-          'Dedicated Car & Bike Parking',
-          'Pro Balls & Bibs Included',
-          'First Aid Kit On-Site',
-        ],
-        openingTime: '06:00',
-        closingTime: '23:00',
-        slotDuration: 60,
-        defaultPrice: 800,
-        advanceType: 'percentage',
-        advanceValue: 30,
-        gallery: [
-          {
-            url: 'https://images.unsplash.com/photo-1529900240041-22f1ad31846c?auto=format&fit=crop&w=1200&q=80',
-            caption: 'Main Football Pitch Under Floodlights',
-            isCover: true,
-          },
-          {
-            url: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1200&q=80',
-            caption: 'FIFA-Grade 50mm Artificial Turf Pile',
-            isCover: false,
-          },
-          {
-            url: 'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=1200&q=80',
-            caption: 'Box Cricket Setup with Perimeter Nets',
-            isCover: false,
-          },
-          {
-            url: 'https://images.unsplash.com/photo-1577223625816-7546f13df25d?auto=format&fit=crop&w=1200&q=80',
-            caption: 'Locker Rooms and Clean Shower Facilities',
-            isCover: false,
-          },
-        ],
-        contactPhone: '+91 98765 43210',
-        whatsappNumber: '+919876543210',
-      });
+      return sendError(
+        res,
+        'Turf not configured',
+        404
+      );
     }
-    return sendSuccess(res, { turf }, 'Turf details retrieved');
+
+    const {
+      data: settings,
+      error: settingsError,
+    } = await supabase
+      .from('turf_settings')
+      .select('*')
+      .eq('turf_id', turf.id)
+      .single();
+
+    if (settingsError) {
+      throw new Error(
+        `Unable to load turf settings: ${settingsError.message}`
+      );
+    }
+
+    const {
+      data: businessHours,
+      error: hoursError,
+    } = await supabase
+      .from('business_hours')
+      .select('*')
+      .eq('turf_id', turf.id)
+      .order('day_of_week', {
+        ascending: true,
+      });
+
+    if (hoursError) {
+      throw new Error(
+        `Unable to load business hours: ${hoursError.message}`
+      );
+    }
+
+    /*
+     * Keep the response compatible with the existing
+     * frontend while the database is now PostgreSQL.
+     */
+
+    const openingHours =
+      businessHours?.find(
+        (day) => day.is_open
+      );
+
+    const responseTurf = {
+      id: turf.id,
+      _id: turf.id,
+
+      name: turf.name,
+      tagline: turf.tagline,
+      description: turf.description,
+
+      address: turf.address,
+      city: turf.city,
+      state: turf.state,
+      country: turf.country,
+
+      latitude: turf.latitude,
+      longitude: turf.longitude,
+
+      googleMapsUrl:
+        turf.maps_url,
+
+      mapsUrl:
+        turf.maps_url,
+
+      sports:
+        turf.sports || [],
+
+      amenities:
+        turf.amenities || [],
+
+      openingTime:
+        turf.opening_time ||
+        openingHours?.open_time ||
+        null,
+
+      closingTime:
+        turf.closing_time ||
+        openingHours?.close_time ||
+        null,
+
+      slotDuration:
+        settings?.slot_duration_minutes ||
+        60,
+
+      defaultPrice:
+        turf.default_price !== null
+          ? Number(turf.default_price)
+          : null,
+
+      advanceType:
+        'percentage',
+
+      advanceValue:
+        Number(
+          settings?.advance_percentage || 30
+        ),
+
+      gallery:
+        turf.gallery || [],
+
+      contactPhone:
+        turf.contact_phone,
+
+      whatsappNumber:
+        turf.whatsapp_phone,
+
+      emergencyPhone:
+        turf.emergency_phone,
+
+      isActive:
+        turf.active,
+
+      settings,
+
+      businessHours:
+        businessHours || [],
+    };
+
+    return sendSuccess(
+      res,
+      {
+        turf: responseTurf,
+      },
+      'Turf details retrieved'
+    );
   } catch (error) {
     next(error);
   }
@@ -71,23 +163,11 @@ const getTurf = async (req, res, next) => {
 
 const getReviews = async (req, res, next) => {
   try {
-    const turf = await Turf.findOne({ isActive: true });
-    if (!turf) {
-      return sendSuccess(res, { reviews: [], averageRating: 5.0, totalReviews: 0 });
-    }
-
-    const reviews = await Review.find({ turfId: turf._id, isApproved: true }).sort({ createdAt: -1 }).limit(20);
-
-    const totalRating = reviews.reduce((sum, r) => sum + r.rating, 0);
-    const averageRating = reviews.length > 0 ? (totalRating / reviews.length).toFixed(1) : '5.0';
+    const result = await reviewService.getReviews();
 
     return sendSuccess(
       res,
-      {
-        reviews,
-        averageRating: Number(averageRating),
-        totalReviews: reviews.length,
-      },
+      result,
       'Reviews retrieved successfully'
     );
   } catch (error) {
@@ -98,26 +178,27 @@ const getReviews = async (req, res, next) => {
 const createReview = async (req, res, next) => {
   try {
     const { rating, comment, customerName } = req.body;
-    const turf = await Turf.findOne({ isActive: true });
-    if (!turf) {
-      return sendError(res, 'Turf not found', 404);
-    }
 
     if (!rating || !comment) {
-      return sendError(res, 'Rating and comment are required', 400);
+      return sendError(
+        res,
+        'Rating and comment are required',
+        400
+      );
     }
 
-    const review = await Review.create({
-      turfId: turf._id,
-      userId: req.user ? req.user._id : undefined,
-      customerName: req.user ? req.user.name : customerName || 'Player',
-      rating: Math.min(5, Math.max(1, Number(rating))),
-      comment: comment.trim(),
-      isVerifiedBooking: true,
-      isApproved: true,
+    const review = await reviewService.createReview({
+      rating,
+      comment,
+      customerName,
     });
 
-    return sendSuccess(res, { review }, 'Thank you for your review!', 201);
+    return sendSuccess(
+      res,
+      { review },
+      'Thank you for your review!',
+      201
+    );
   } catch (error) {
     next(error);
   }

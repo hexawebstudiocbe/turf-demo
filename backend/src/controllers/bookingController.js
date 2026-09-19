@@ -1,23 +1,40 @@
-const Booking = require('../models/Booking');
-const Turf = require('../models/Turf');
 const bookingService = require('../services/bookingService');
 const { sendSuccess, sendError } = require('../utils/response');
+const supabase = require('../config/supabase');
 
 const holdSlot = async (req, res, next) => {
   try {
     const { date, startTime, durationHours, duration, customerDetails, sport } = req.body;
 
-    let turf = await Turf.findOne({ isActive: true });
-    if (!turf) {
-      return sendError(res, 'Turf not configured', 404);
+    const { data: turf, error: turfError } = await supabase
+      .from('turf')
+      .select('id')
+      .eq('active', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (turfError) {
+      throw new Error(`Failed to load turf: ${turfError.message}`);
     }
 
-    if (!customerDetails || !customerDetails.name || !customerDetails.email || !customerDetails.phone) {
-      return sendError(res, 'Please provide customer name, email, and phone number', 400);
+    if (!turf) {
+      throw new Error('No active turf configured');
+    }
+
+    if (
+      !customerDetails ||
+      !customerDetails.name ||
+      !customerDetails.phone
+    ) {
+      return sendError(
+        res,
+        'Please provide customer name and phone number',
+        400
+      );
     }
 
     const holdResult = await bookingService.holdSlot({
-      turfId: turf._id,
+      turfId: turf.id,
       date,
       startTime,
       durationHours: durationHours || (duration ? Math.round(duration / 60) : 1),
@@ -63,15 +80,88 @@ const getBookingById = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Search by bookingId (TB-xxx) or MongoDB _id
-    const query = id.startsWith('TB-') ? { bookingId: id } : { _id: id };
-    const booking = await Booking.findOne(query).populate('turfId');
+    const { data: booking, error: bookingError } = await supabase
+      .from('bookings')
+      .select(`
+        *,
+        customers (
+          id,
+          name,
+          phone
+        ),
+        turf (
+          id,
+          name,
+          address,
+          city,
+          state
+        )
+      `)
+      .eq(id.startsWith('TB-') ? 'booking_number' : 'id', id)
+      .maybeSingle();
+
+    if (bookingError) {
+      throw new Error(
+        `Failed to load booking: ${bookingError.message}`
+      );
+    }
 
     if (!booking) {
       return sendError(res, 'Booking not found', 404);
     }
 
-    return sendSuccess(res, { booking }, 'Booking retrieved successfully');
+    const result = {
+      id: booking.id,
+
+      bookingId: booking.booking_number,
+      bookingNumber: booking.booking_number,
+
+      turfId: booking.turf_id,
+      turf: booking.turf || null,
+
+      date: booking.booking_date,
+      bookingDate: booking.booking_date,
+
+      startTime: booking.start_time,
+      endTime: booking.end_time,
+      duration: booking.duration_hours,
+
+      bookingStatus: booking.status,
+      status: booking.status,
+
+      paymentStatus: booking.payment_status,
+
+      totalAmount: Number(booking.total_amount || 0),
+      advanceAmount: Number(booking.advance_required || 0),
+      amountPaid: Number(booking.amount_paid || 0),
+      remainingAmount: Number(booking.balance_amount || 0),
+
+      customerId: booking.customer_id,
+      customerDetails: booking.customers
+        ? {
+            name: booking.customers.name,
+            phone: booking.customers.phone,
+          }
+        : null,
+
+      source: booking.source,
+
+      holdExpiresAt: booking.hold_expires_at,
+
+      razorpayOrderId: booking.razorpay_order_id,
+      razorpayPaymentId: booking.razorpay_payment_id,
+
+      qrToken: booking.qr_token,
+
+      createdAt: booking.created_at,
+      updatedAt: booking.updated_at,
+    };
+
+    return sendSuccess(
+      res,
+      { booking: result },
+      'Booking retrieved'
+    );
   } catch (error) {
     next(error);
   }
@@ -79,17 +169,98 @@ const getBookingById = async (req, res, next) => {
 
 const getMyBookings = async (req, res, next) => {
   try {
-    const userEmail = req.user.email;
-    const userId = req.user._id;
+    const phone =
+      req.query.phone ||
+      req.body?.phone ||
+      req.user?.phone;
 
-    const bookings = await Booking.find({
-      $or: [{ userId }, { 'customerDetails.email': userEmail }],
-      bookingStatus: { $ne: 'EXPIRED' },
-    })
-      .populate('turfId')
-      .sort({ createdAt: -1 });
+    if (!phone) {
+      return sendError(res, 'Phone number is required', 400);
+    }
 
-    return sendSuccess(res, { bookings }, 'My bookings retrieved');
+    const { data: customer, error: customerError } = await supabase
+      .from('customers')
+      .select('id, name, phone')
+      .eq('phone', phone)
+      .maybeSingle();
+
+    if (customerError) {
+      throw new Error(
+        `Failed to find customer: ${customerError.message}`
+      );
+    }
+
+    if (!customer) {
+      return sendSuccess(
+        res,
+        { bookings: [] },
+        'No bookings found'
+      );
+    }
+
+    const { data: bookings, error: bookingsError } = await supabase
+      .from('bookings')
+      .select(`
+        *,
+        turf (
+          id,
+          name
+        )
+      `)
+      .eq('customer_id', customer.id)
+      .order('booking_date', { ascending: false })
+      .order('start_time', { ascending: false });
+
+    if (bookingsError) {
+      throw new Error(
+        `Failed to load customer bookings: ${bookingsError.message}`
+      );
+    }
+
+    const result = (bookings || []).map((booking) => ({
+      id: booking.id,
+
+      bookingId: booking.booking_number,
+      bookingNumber: booking.booking_number,
+
+      turfId: booking.turf_id,
+      turf: booking.turf || null,
+
+      date: booking.booking_date,
+      bookingDate: booking.booking_date,
+
+      startTime: booking.start_time,
+      endTime: booking.end_time,
+      duration: booking.duration_hours,
+
+      bookingStatus: booking.status,
+      status: booking.status,
+
+      paymentStatus: booking.payment_status,
+
+      totalAmount: Number(booking.total_amount || 0),
+      advanceAmount: Number(booking.advance_required || 0),
+      amountPaid: Number(booking.amount_paid || 0),
+      remainingAmount: Number(booking.balance_amount || 0),
+
+      source: booking.source,
+
+      createdAt: booking.created_at,
+      updatedAt: booking.updated_at,
+    }));
+
+    return sendSuccess(
+      res,
+      {
+        customer: {
+          id: customer.id,
+          name: customer.name,
+          phone: customer.phone,
+        },
+        bookings: result,
+      },
+      'Bookings retrieved'
+    );
   } catch (error) {
     next(error);
   }
@@ -109,8 +280,8 @@ const cancelCustomerBooking = async (req, res, next) => {
 
 module.exports = {
   holdSlot,
-  verifyPaymentAndConfirm,
+  
   getBookingById,
   getMyBookings,
-  cancelCustomerBooking,
+  
 };

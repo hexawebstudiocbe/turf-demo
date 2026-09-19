@@ -124,18 +124,6 @@ const Navbar = () => {
             >
               Location
             </a>
-            {isAuthenticated && (
-              <Link
-                to="/my-bookings"
-                className={`px-3.5 py-2 rounded-lg text-sm font-medium transition ${
-                  isActive('/my-bookings')
-                    ? 'text-pitch-400 bg-pitch-950/60'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-900/60'
-                }`}
-              >
-                My Bookings
-              </Link>
-            )}
           </nav>
 
           {/* Action CTAs */}
@@ -168,9 +156,10 @@ const Navbar = () => {
               <div className="flex items-center gap-2">
                 <Link
                   to="/login"
-                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition"
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition flex items-center gap-2"
                 >
-                  Login
+                  <Shield className="w-4 h-4" />
+                  Admin Login
                 </Link>
                 <Link
                   to="/book"
@@ -219,15 +208,6 @@ const Navbar = () => {
           >
             Book Slots
           </Link>
-          {isAuthenticated && (
-            <Link
-              to="/my-bookings"
-              onClick={() => setMobileMenuOpen(false)}
-              className="block px-3 py-2 rounded-lg text-base font-medium text-slate-200 hover:bg-slate-800"
-            >
-              My Bookings
-            </Link>
-          )}
           {isAdmin && (
             <Link
               to="/admin"
@@ -253,20 +233,14 @@ const Navbar = () => {
                 </button>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-2 pt-2">
+              <div className="grid grid-cols-1 gap-2 pt-2">
                 <Link
                   to="/login"
                   onClick={() => setMobileMenuOpen(false)}
-                  className="btn-secondary text-center text-sm py-2"
+                  className="btn-secondary text-center text-sm py-2 flex justify-center items-center gap-2"
                 >
-                  Login
-                </Link>
-                <Link
-                  to="/register"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="btn-primary text-center text-sm py-2"
-                >
-                  Register
+                  <Shield className="w-4 h-4" />
+                  Admin Login
                 </Link>
               </div>
             )}

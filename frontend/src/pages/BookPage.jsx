@@ -207,8 +207,29 @@ const BookPage = () => {
   };
 
   const handlePaymentSuccess = (confirmedBooking) => {
+    console.log(
+      '[BookPage] Payment confirmation response:',
+      confirmedBooking
+    );
+
     setShowPaymentModal(false);
-    navigate(`/booking/confirmation/${confirmedBooking.bookingId || confirmedBooking._id}`);
+
+    const bookingId =
+      confirmedBooking?.id ||
+      confirmedBooking?.bookingId ||
+      confirmedBooking?.bookingNumber;
+
+    if (!bookingId) {
+      console.error(
+        '[BookPage] Payment succeeded but no booking identifier was returned:',
+        confirmedBooking
+      );
+
+      navigate('/booking/confirmation');
+      return;
+    }
+
+    navigate(`/booking/confirmation/${bookingId}`);
   };
 
   const handlePaymentFailure = (reason) => {

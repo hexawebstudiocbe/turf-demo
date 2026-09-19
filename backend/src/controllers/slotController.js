@@ -1,6 +1,6 @@
-const Turf = require('../models/Turf');
 const { getSlotsForDate } = require('../services/slotService');
 const { sendSuccess, sendError } = require('../utils/response');
+const supabase = require('../config/supabase');
 
 const getSlots = async (req, res, next) => {
   try {
@@ -16,12 +16,18 @@ const getSlots = async (req, res, next) => {
       return sendError(res, 'Invalid date format. Expected YYYY-MM-DD', 400);
     }
 
-    const turf = await Turf.findOne({ isActive: true });
-    if (!turf) {
+    const { data: turf, error: turfError } = await supabase
+      .from('turf')
+      .select('id')
+      .eq('active', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (turfError || !turf) {
       return sendError(res, 'Turf not configured', 404);
     }
 
-    const slotsData = await getSlotsForDate(turf._id, date);
+    const slotsData = await getSlotsForDate(turf.id, date);
     return sendSuccess(res, slotsData, 'Slots retrieved successfully');
   } catch (error) {
     next(error);

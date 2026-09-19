@@ -1,31 +1,147 @@
-const Booking = require('../models/Booking');
-const Turf = require('../models/Turf');
-const BlockedSlot = require('../models/BlockedSlot');
-const Payment = require('../models/Payment');
-const { calculateMultiHourPrice } = require('./pricingService');
-const { cleanupExpiredHolds } = require('./slotService');
+const supabase = require('../config/supabase');
+
+const {
+  calculateMultiHourPrice,
+} = require('./pricingService');
+
 const {
   isDateInPast,
   isSlotInPast,
   getConsecutiveSlotIntervals,
-  doTimeIntervalsOverlap,
   timeToMinutes,
 } = require('../utils/timeHelper');
-const { createOrder, verifyPaymentSignature } = require('../config/razorpay');
-const { generateBookingQRToken } = require('../utils/qrHelper');
 
-/**
- * Generates human-friendly unique booking ID
- */
-const generateBookingId = (dateStr) => {
-  const cleanDate = dateStr.replace(/-/g, '');
-  const randomSuffix = Math.floor(10000 + Math.random() * 90000);
+const paymentProvider = require('./paymentProvider');
+
+const {
+  generateBookingQRToken,
+} = require('../utils/qrHelper');
+
+const generateBookingId = (
+  dateStr
+) => {
+  const cleanDate =
+    dateStr.replace(/-/g, '');
+
+  const randomSuffix =
+    Math.floor(
+      10000 +
+      Math.random() * 90000
+    );
+
   return `TB-${cleanDate}-${randomSuffix}`;
 };
 
-/**
- * Initiates a temporary hold on multi-hour consecutive slots and creates a Razorpay order
- */
+const getTurf = async (turfId) => {
+  const { data, error } = await supabase
+    .from('turf')
+    .select('*')
+    .eq('id', turfId)
+    .eq('active', true)
+    .single();
+
+  if (error || !data) {
+    const err =
+      new Error('Turf not found');
+
+    err.statusCode = 404;
+
+    throw err;
+  }
+
+  return data;
+};
+
+const getOrCreateCustomer = async ({
+  name,
+  phone,
+}) => {
+  const cleanName =
+    String(name || '').trim();
+
+  const cleanPhone =
+    String(phone || '').trim();
+
+  if (!cleanName || !cleanPhone) {
+    const error =
+      new Error(
+        'Customer name and phone are required'
+      );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  const {
+    data: existing,
+    error: lookupError,
+  } = await supabase
+    .from('customers')
+    .select('*')
+    .eq('phone', cleanPhone)
+    .order('created_at', {
+      ascending: true,
+    })
+    .limit(1)
+    .maybeSingle();
+
+  if (lookupError) {
+    throw new Error(
+      `Unable to find customer: ${lookupError.message}`
+    );
+  }
+
+  if (existing) {
+    if (
+      existing.name !==
+      cleanName
+    ) {
+      const {
+        data: updated,
+        error: updateError,
+      } = await supabase
+        .from('customers')
+        .update({
+          name: cleanName,
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (updateError) {
+        throw new Error(
+          `Unable to update customer: ${updateError.message}`
+        );
+      }
+
+      return updated;
+    }
+
+    return existing;
+  }
+
+  const {
+    data: customer,
+    error,
+  } = await supabase
+    .from('customers')
+    .insert({
+      name: cleanName,
+      phone: cleanPhone,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(
+      `Unable to create customer: ${error.message}`
+    );
+  }
+
+  return customer;
+};
+
 const holdSlot = async ({
   turfId,
   date,
@@ -33,304 +149,379 @@ const holdSlot = async ({
   durationHours = 1,
   customerDetails,
   sport,
-  userId = null,
 }) => {
-  if (!turfId || !date || !startTime || !customerDetails) {
-    const error = new Error('Missing required booking details');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const turf = await Turf.findById(turfId);
-  if (!turf) {
-    const error = new Error('Turf not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const hoursToBook = Math.max(1, Number(durationHours) || 1);
-
-  // 1. Validate past dates & slots
-  if (isDateInPast(date)) {
-    const error = new Error('Cannot book slots for past dates');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (isSlotInPast(date, startTime)) {
-    const error = new Error('This time slot has already passed for today');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  // 2. Generate all consecutive underlying intervals
-  const { intervals, slotTimes, endTime } = getConsecutiveSlotIntervals(
-    startTime,
-    hoursToBook,
-    turf.slotDuration || 60
-  );
-
-  // Validate that requested duration does not exceed turf closing time
-  const closingMins = timeToMinutes(turf.closingTime || '23:00');
-  const endMins = timeToMinutes(endTime);
-  if (endMins > closingMins) {
-    const error = new Error(
-      `Requested duration exceeds turf closing time (${turf.closingTime || '23:00'})`
-    );
-    error.statusCode = 400;
-    throw error;
-  }
-
-  // 3. Clean up any expired holds for this date
-  await cleanupExpiredHolds(turfId, date);
-
-  // 4. Check if ANY underlying interval is blocked by admin
-  const blockedSlots = await BlockedSlot.find({ turfId, date });
-  for (const interval of intervals) {
-    const isBlocked = blockedSlots.find((b) =>
-      doTimeIntervalsOverlap(interval.startTime, interval.endTime, b.startTime, b.endTime)
-    );
-    if (isBlocked) {
-      const error = new Error(
-        `Slot ${interval.startTime}–${interval.endTime} is currently blocked for ${isBlocked.reason}`
+  if (
+    !turfId ||
+    !date ||
+    !startTime ||
+    !customerDetails
+  ) {
+    const error =
+      new Error(
+        'Missing required booking details'
       );
-      error.statusCode = 409;
-      throw error;
-    }
+
+    error.statusCode = 400;
+
+    throw error;
   }
 
-  // 5. Check for existing active bookings overlapping ANY requested underlying slot
-  const activeBookings = await Booking.find({
-    turfId,
-    date,
-    bookingStatus: { $in: ['HELD', 'CONFIRMED', 'COMPLETED'] },
-  });
+  // --------------------------------------------------------
+  // Customer = name + phone only
+  // --------------------------------------------------------
 
-  for (const interval of intervals) {
-    const existingActive = activeBookings.find((b) => {
-      if (b.slotTimes && b.slotTimes.length > 0) {
-        return b.slotTimes.includes(interval.startTime);
-      }
-      return doTimeIntervalsOverlap(interval.startTime, interval.endTime, b.startTime, b.endTime);
-    });
-
-    if (existingActive) {
-      const error = new Error(
-        existingActive.bookingStatus === 'HELD'
-          ? `Slot ${interval.startTime}–${interval.endTime} is currently being held by another customer. Please choose another duration or start time.`
-          : `Slot ${interval.startTime}–${interval.endTime} is already booked.`
+  if (
+    !customerDetails.name ||
+    !customerDetails.phone
+  ) {
+    const error =
+      new Error(
+        'Customer name and phone number are required'
       );
-      error.statusCode = 409;
-      throw error;
-    }
+
+    error.statusCode = 400;
+
+    throw error;
   }
 
-  // 6. Calculate verified multi-hour price on the server
-  const pricing = await calculateMultiHourPrice(turfId, date, startTime, hoursToBook);
+  const turf =
+    await getTurf(turfId);
 
-  // 7. Generate booking reference and hold expiration (10 minutes)
-  const bookingId = generateBookingId(date);
-  const holdExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  const hours =
+    Number(durationHours);
 
-  // 8. Create Razorpay order
-  const razorpayOrder = await createOrder({
-    amount: pricing.advanceAmount,
-    receipt: bookingId,
-    notes: {
-      bookingId,
-      turfId: turfId.toString(),
+  if (
+    !Number.isInteger(hours) ||
+    hours < 1
+  ) {
+    const error =
+      new Error(
+        'Duration must be a whole number of hours'
+      );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  if (
+    isDateInPast(date)
+  ) {
+    const error =
+      new Error(
+        'Cannot book slots for past dates'
+      );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  if (
+    isSlotInPast(
+      date,
+      startTime
+    )
+  ) {
+    const error =
+      new Error(
+        'This time slot has already passed for today'
+      );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  const {
+    intervals,
+    slotTimes,
+    endTime,
+  } =
+    getConsecutiveSlotIntervals(
+      startTime,
+      hours,
+      60
+    );
+
+  const closingMins =
+    timeToMinutes(
+      turf.closing_time ||
+      '23:00'
+    );
+
+  const endMins =
+    timeToMinutes(endTime);
+
+  if (
+    endMins >
+    closingMins
+  ) {
+    const error =
+      new Error(
+        `Requested duration exceeds turf closing time (${turf.closing_time || '23:00'})`
+      );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+  // --------------------------------------------------------
+  // Business hours check
+  // --------------------------------------------------------
+
+  const dayOfWeek =
+    new Date(
+      `${date}T00:00:00`
+    ).getUTCDay();
+
+  const {
+    data: businessHours,
+    error: hoursError,
+  } = await supabase
+    .from('business_hours')
+    .select('*')
+    .eq('turf_id', turfId)
+    .eq('day_of_week', dayOfWeek)
+    .single();
+
+  if (
+    hoursError ||
+    !businessHours ||
+    !businessHours.is_open
+  ) {
+    const error =
+      new Error(
+        'The turf is closed on the selected date'
+      );
+
+    error.statusCode = 409;
+
+    throw error;
+  }
+
+  // --------------------------------------------------------
+  // Calculate server-side price
+  // --------------------------------------------------------
+
+  const pricing =
+    await calculateMultiHourPrice(
+      turfId,
       date,
       startTime,
-      endTime,
-      durationHours: hoursToBook,
-      customerName: customerDetails.name,
-      customerPhone: customerDetails.phone,
-    },
-  });
+      hours
+    );
 
-  // 9. Create single HELD booking in MongoDB covering entire multi-hour period
-  // Database compound unique partial index on { turfId: 1, date: 1, slotTimes: 1 } ensures absolute race-condition safety
-  const booking = new Booking({
-    bookingId,
-    userId: userId || undefined,
-    turfId,
-    customerDetails,
-    sport: sport || 'Football (5v5)',
-    date,
-    startTime,
-    endTime,
-    durationHours: hoursToBook,
-    duration: hoursToBook * (turf.slotDuration || 60),
-    slotTimes,
-    slotBreakdown: pricing.slotBreakdown,
-    totalAmount: pricing.totalAmount,
-    advanceAmount: pricing.advanceAmount,
-    remainingAmount: pricing.remainingAmount,
-    bookingStatus: 'HELD',
-    paymentStatus: 'PENDING',
-    razorpayOrderId: razorpayOrder.id,
-    holdExpiresAt,
-  });
+  const bookingNumber =
+    generateBookingId(date);
 
-  await booking.save();
+  const holdExpiresAt =
+    new Date(
+      Date.now() +
+      10 * 60 * 1000
+    );
+
+  // --------------------------------------------------------
+  // Customer
+  // --------------------------------------------------------
+
+  const customer =
+    await getOrCreateCustomer({
+      name:
+        customerDetails.name,
+      phone:
+        customerDetails.phone,
+    });
+
+  // --------------------------------------------------------
+  // IMPORTANT:
+  // Reserve slots FIRST through PostgreSQL RPC.
+  //
+  // We don't create a Razorpay order before the DB hold.
+  // Otherwise an order could exist for a slot that failed
+  // to reserve.
+  // --------------------------------------------------------
+
+  let bookingId;
+
+  try {
+    const {
+      data,
+      error,
+    } = await supabase.rpc(
+      'create_booking_hold',
+      {
+        p_turf_id: turfId,
+        p_customer_id:
+          customer.id,
+        p_booking_date:
+          date,
+        p_start_time:
+          startTime,
+        p_duration_hours:
+          hours,
+        p_total_amount:
+          pricing.totalAmount,
+        p_advance_required:
+          pricing.advanceAmount,
+        p_booking_number:
+          bookingNumber,
+        p_hold_expires_at:
+          holdExpiresAt.toISOString(),
+      }
+    );
+
+    if (error) {
+      const conflict =
+        new Error(
+          error.message.includes(
+            'unavailable'
+          )
+            ? 'One or more requested slots are unavailable'
+            : error.message
+        );
+
+      conflict.statusCode = 409;
+
+      throw conflict;
+    }
+
+    bookingId = data;
+  } catch (error) {
+    throw error;
+  }
+
+  // --------------------------------------------------------
+  // Create Razorpay order
+  // --------------------------------------------------------
+
+  let razorpayOrder;
+
+  try {
+    razorpayOrder =
+      await paymentProvider.createOrder({
+        amount:
+          pricing.advanceAmount,
+        receipt:
+          bookingNumber,
+        notes: {
+          bookingId:
+            bookingNumber,
+          turfId:
+            String(turfId),
+          date,
+          startTime,
+          endTime,
+          durationHours:
+            hours,
+          customerName:
+            customer.name,
+          customerPhone:
+            customer.phone,
+        },
+      });
+  } catch (error) {
+    // If Razorpay creation fails, release the DB hold.
+    await supabase
+      .from(
+        'slot_reservations'
+      )
+      .delete()
+      .eq(
+        'booking_id',
+        bookingId
+      );
+
+    await supabase
+      .from('bookings')
+      .update({
+        booking_status:
+          'PAYMENT_FAILED',
+        payment_status:
+          'FAILED',
+      })
+      .eq(
+        'id',
+        bookingId
+      );
+
+    throw error;
+  }
+
+  // --------------------------------------------------------
+  // Attach Razorpay order to booking
+  // --------------------------------------------------------
+
+  const {
+    data: booking,
+    error: updateError,
+  } = await supabase
+    .from('bookings')
+    .update({
+      razorpay_order_id:
+        razorpayOrder.id,
+    })
+    .eq('id', bookingId)
+    .select()
+    .single();
+
+  if (updateError) {
+    throw new Error(
+      `Unable to save payment order: ${updateError.message}`
+    );
+  }
 
   return {
-    bookingId: booking.bookingId,
-    orderId: razorpayOrder.id,
+    bookingId:
+      booking.booking_number,
+
+    orderId:
+      razorpayOrder.id,
+
     currency: 'INR',
+
     startTime,
     endTime,
-    durationHours: hoursToBook,
+
+    durationHours:
+      hours,
+
     slotTimes,
-    slotBreakdown: pricing.slotBreakdown,
-    totalAmount: pricing.totalAmount,
-    advanceAmount: pricing.advanceAmount,
-    remainingAmount: pricing.remainingAmount,
+
+    slotBreakdown:
+      pricing.slotBreakdown,
+
+    totalAmount:
+      pricing.totalAmount,
+
+    advanceAmount:
+      pricing.advanceAmount,
+
+    remainingAmount:
+      pricing.remainingAmount,
+
     holdExpiresAt,
-    isMockPayment: razorpayOrder.isMock || false,
-    keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_placeholder',
-    customerDetails,
-  };
-};
 
-/**
- * Verifies Razorpay payment and confirms booking (Idempotent)
- */
-const confirmBooking = async ({ razorpayOrderId, razorpayPaymentId, razorpaySignature }) => {
-  if (!razorpayOrderId) {
-    const error = new Error('Razorpay Order ID is required');
-    error.statusCode = 400;
-    throw error;
-  }
+    isMockPayment:
+      razorpayOrder.isMock ||
+      false,
 
-  // 1. Find booking associated with order
-  const booking = await Booking.findOne({ razorpayOrderId }).populate('turfId');
-  if (!booking) {
-    const error = new Error('Booking not found for this payment order');
-    error.statusCode = 404;
-    throw error;
-  }
+    keyId:
+      process.env.RAZORPAY_KEY_ID ||
+      'rzp_test_placeholder',
 
-  // 2. IDEMPOTENCY: If already confirmed, return current booking state
-  if (booking.bookingStatus === 'CONFIRMED' || booking.bookingStatus === 'COMPLETED') {
-    return booking;
-  }
+    customerDetails: {
+      name:
+        customer.name,
+      phone:
+        customer.phone,
+    },
 
-  // 3. Verify signature
-  const isValidSignature = verifyPaymentSignature({
-    order_id: razorpayOrderId,
-    payment_id: razorpayPaymentId,
-    signature: razorpaySignature,
-  });
-
-  if (!isValidSignature) {
-    booking.bookingStatus = 'PAYMENT_FAILED';
-    booking.paymentStatus = 'FAILED';
-    await booking.save();
-
-    const error = new Error('Invalid payment signature. Payment verification failed.');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  // 4. Generate QR verification token
-  const qrToken = generateBookingQRToken(
-    booking.bookingId,
-    booking.turfId._id,
-    booking.date,
-    booking.startTime
-  );
-
-  // 5. Update booking to CONFIRMED
-  booking.bookingStatus = 'CONFIRMED';
-  booking.paymentStatus = 'SUCCESS';
-  booking.razorpayPaymentId = razorpayPaymentId;
-  booking.qrVerificationToken = qrToken;
-  await booking.save();
-
-  // 6. Record Payment Audit Trail
-  await Payment.create({
-    bookingId: booking._id,
-    userId: booking.userId,
-    razorpayOrderId,
-    razorpayPaymentId,
-    razorpaySignature,
-    amount: booking.advanceAmount,
-    status: 'SUCCESS',
-  });
-
-  return booking;
-};
-
-/**
- * Cancels a booking according to turf cancellation policy
- */
-const cancelBooking = async (bookingId, user, reason = 'Customer requested cancellation') => {
-  const booking = await Booking.findOne({ bookingId }).populate('turfId');
-  if (!booking) {
-    const error = new Error('Booking not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  // Authorization check (admin or owner)
-  if (user.role !== 'ADMIN' && (!booking.userId || booking.userId.toString() !== user._id.toString())) {
-    const error = new Error('Unauthorized to cancel this booking');
-    error.statusCode = 403;
-    throw error;
-  }
-
-  if (booking.bookingStatus === 'CANCELLED') {
-    const error = new Error('Booking is already cancelled');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const turf = booking.turfId;
-  const policy = turf.cancellationPolicy || { freeCancellationHours: 24, refundPercentage: 100 };
-
-  // Calculate hours until slot
-  const [hours, minutes] = booking.startTime.split(':').map(Number);
-  const slotDate = new Date(`${booking.date}T00:00:00`);
-  slotDate.setHours(hours, minutes, 0, 0);
-
-  const now = new Date();
-  const hoursRemaining = (slotDate - now) / (1000 * 60 * 60);
-
-  let refundAmount = 0;
-  let isEligibleForRefund = false;
-
-  if (user.role === 'ADMIN') {
-    refundAmount = booking.advanceAmount;
-    isEligibleForRefund = true;
-  } else if (hoursRemaining >= policy.freeCancellationHours) {
-    refundAmount = Math.round((booking.advanceAmount * (policy.refundPercentage || 100)) / 100);
-    isEligibleForRefund = true;
-  }
-
-  booking.bookingStatus = 'CANCELLED';
-  booking.paymentStatus = refundAmount > 0 ? 'REFUNDED' : booking.paymentStatus;
-  booking.cancellationDetails = {
-    cancelledAt: new Date(),
-    cancelledBy: user._id,
-    refundAmount,
-    reason,
-  };
-
-  await booking.save();
-
-  return {
     booking,
-    refundAmount,
-    isEligibleForRefund,
-    message: isEligibleForRefund
-      ? `Booking cancelled successfully. Refund of ₹${refundAmount} has been approved.`
-      : 'Booking cancelled. As per policy, cancellations under 24 hours are non-refundable.',
   };
 };
 
 module.exports = {
   holdSlot,
-  confirmBooking,
-  cancelBooking,
 };
